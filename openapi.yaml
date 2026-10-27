@@ -1,0 +1,592 @@
+openapi: 3.1.0
+info:
+  title: Transaction Ledger API
+  version: 1.0.0
+  description: |
+    Account, transaction ledger, and money transfer API with PostgreSQL-backed
+    atomicity. All monetary values are decimal strings with exactly two decimal
+    places in responses. The API uses one implicit currency.
+
+    Ordinary transaction references are unique per account. Transfer references
+    are globally unique. Duplicate submissions return `409` even when the retry
+    payload matches the original request.
+servers:
+  - url: http://localhost:3000
+    description: Local development server
+
+tags:
+  - name: Accounts
+  - name: Transactions
+  - name: Transfers
+
+paths:
+  /accounts:
+    post:
+      tags: [Accounts]
+      operationId: createAccount
+      summary: Create an account
+      description: Creates an account with a zero balance. Client-supplied balances, IDs, and timestamps are rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAccountRequest'
+            example:
+              name: Alice Example
+      responses:
+        '201':
+          description: Account created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+              example:
+                id: 11111111-1111-4111-8111-111111111111
+                name: Alice Example
+                balance: '0.00'
+                created_at: '2026-10-27T12:00:00.000Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /accounts/{accountId}/balance:
+    get:
+      tags: [Accounts]
+      operationId: getAccountBalance
+      summary: Get an account balance
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+      responses:
+        '200':
+          description: Current account balance
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BalanceResponse'
+              example:
+                account_id: 11111111-1111-4111-8111-111111111111
+                balance: '60.25'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /accounts/{accountId}/transactions:
+    post:
+      tags: [Transactions]
+      operationId: createTransaction
+      summary: Create a credit or debit
+      description: |
+        Atomically applies the ledger entry and updates the account balance.
+        The account row is locked while the change is evaluated and committed.
+        References beginning with `transfer:` are reserved for transfer entries.
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTransactionRequest'
+            examples:
+              credit:
+                value:
+                  type: credit
+                  amount: '100.50'
+              debit:
+                value:
+                  type: debit
+                  amount: '40.25'
+                  description: Office supplies
+                  reference_id: debit-2026-001
+      responses:
+        '201':
+          description: Transaction recorded and balance updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResult'
+              example:
+                transaction:
+                  id: 22222222-2222-4222-8222-222222222222
+                  account_id: 11111111-1111-4111-8111-111111111111
+                  type: debit
+                  amount: '40.25'
+                  description: Office supplies
+                  reference_id: debit-2026-001
+                  transfer_id: null
+                  created_at: '2026-10-27T12:01:00.000Z'
+                balance: '60.25'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    get:
+      tags: [Transactions]
+      operationId: listTransactions
+      summary: List account transaction history
+      description: |
+        Returns newest-first history (`created_at DESC, id DESC`) with consistent
+        pagination metadata. Pages beyond the available rows return an empty
+        transaction list. Transfer debit/credit entries appear in normal history
+        with a shared `transfer_id`.
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+        - name: type
+          in: query
+          required: false
+          description: Filter by entry type
+          schema:
+            type: string
+            enum: [credit, debit]
+        - name: page
+          in: query
+          required: false
+          description: Positive page number
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          required: false
+          description: Page size, capped at 100
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Transaction history page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionHistory'
+              example:
+                account_id: 11111111-1111-4111-8111-111111111111
+                transactions:
+                  - id: 33333333-3333-4333-8333-333333333333
+                    account_id: 11111111-1111-4111-8111-111111111111
+                    type: debit
+                    amount: '30.25'
+                    description: Monthly rent
+                    reference_id: transfer:44444444-4444-4444-8444-444444444444
+                    transfer_id: 44444444-4444-4444-8444-444444444444
+                    created_at: '2026-10-27T12:02:00.000Z'
+                  - id: 22222222-2222-4222-8222-222222222222
+                    account_id: 11111111-1111-4111-8111-111111111111
+                    type: credit
+                    amount: '100.50'
+                    description: ''
+                    reference_id: credit-2026-001
+                    transfer_id: null
+                    created_at: '2026-10-27T12:01:00.000Z'
+                pagination:
+                  current_page: 1
+                  page_size: 20
+                  total_records: 2
+                  total_pages: 1
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /transfers:
+    post:
+      tags: [Transfers]
+      operationId: createTransfer
+      summary: Transfer money between two accounts
+      description: |
+        Creates one transfer, one source debit, and one destination credit in a
+        single database transaction. Both accounts are locked in ascending UUID
+        order to avoid deadlocks. The reference is globally unique. Transfers
+        between the same account are rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTransferRequest'
+            example:
+              source_account_id: 11111111-1111-4111-8111-111111111111
+              destination_account_id: 55555555-5555-4555-8555-555555555555
+              amount: '30.25'
+              reference_id: rent-2026-10
+              description: Monthly rent
+      responses:
+        '201':
+          description: Transfer completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransferResult'
+              example:
+                transfer_id: 44444444-4444-4444-8444-444444444444
+                source_transaction_id: 33333333-3333-4333-8333-333333333333
+                destination_transaction_id: 66666666-6666-4666-8666-666666666666
+                source_balance: '69.75'
+                destination_balance: '30.25'
+                amount: '30.25'
+                reference_id: rent-2026-10
+                description: Monthly rent
+                created_at: '2026-10-27T12:02:00.000Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  parameters:
+    AccountId:
+      name: accountId
+      in: path
+      required: true
+      description: Account UUID
+      schema:
+        type: string
+        format: uuid
+      example: 11111111-1111-4111-8111-111111111111
+
+  schemas:
+    CreateAccountRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Trimmed, nonempty account name
+          example: Alice Example
+
+    Account:
+      type: object
+      additionalProperties: false
+      required: [id, name, balance, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        balance:
+          type: string
+          pattern: '^[0-9]{1,16}\.[0-9]{2}$'
+          example: '100.50'
+        created_at:
+          type: string
+          format: date-time
+
+    BalanceResponse:
+      type: object
+      additionalProperties: false
+      required: [account_id, balance]
+      properties:
+        account_id:
+          type: string
+          format: uuid
+        balance:
+          type: string
+          pattern: '^[0-9]{1,16}\.[0-9]{2}$'
+
+    CreateTransactionRequest:
+      type: object
+      additionalProperties: false
+      required: [type, amount, reference_id]
+      properties:
+        type:
+          type: string
+          enum: [credit, debit]
+        amount:
+          type: string
+          pattern: '^(0|[1-9][0-9]{0,15})(\.[0-9]{1,2})?$'
+          description: Positive decimal string with at most two decimal places
+          example: '100.50'
+        description:
+          type: string
+          maxLength: 1000
+          default: ''
+        reference_id:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Trimmed, nonempty, unique per account; the `transfer:` prefix is reserved
+          example: credit-2026-001
+
+    Transaction:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - account_id
+        - type
+        - amount
+        - description
+        - reference_id
+        - transfer_id
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        account_id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [credit, debit]
+        amount:
+          type: string
+          pattern: '^[0-9]{1,16}\.[0-9]{2}$'
+        description:
+          type: string
+          maxLength: 1000
+        reference_id:
+          type: string
+          minLength: 1
+          maxLength: 200
+        transfer_id:
+          type: [string, 'null']
+          format: uuid
+          description: Shared by the debit and credit entries of one transfer; null for ordinary entries
+        created_at:
+          type: string
+          format: date-time
+
+    TransactionResult:
+      type: object
+      additionalProperties: false
+      required: [transaction, balance]
+      properties:
+        transaction:
+          $ref: '#/components/schemas/Transaction'
+        balance:
+          type: string
+          pattern: '^[0-9]{1,16}\.[0-9]{2}$'
+          description: Account balance after the transaction
+
+    Pagination:
+      type: object
+      additionalProperties: false
+      required: [current_page, page_size, total_records, total_pages]
+      properties:
+        current_page:
+          type: integer
+          minimum: 1
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 100
+        total_records:
+          type: integer
+          minimum: 0
+        total_pages:
+          type: integer
+          minimum: 0
+          description: Number of available pages; zero when there are no records
+
+    TransactionHistory:
+      type: object
+      additionalProperties: false
+      required: [account_id, transactions, pagination]
+      properties:
+        account_id:
+          type: string
+          format: uuid
+        transactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Transaction'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    CreateTransferRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - source_account_id
+        - destination_account_id
+        - amount
+        - reference_id
+      properties:
+        source_account_id:
+          type: string
+          format: uuid
+        destination_account_id:
+          type: string
+          format: uuid
+          description: Must differ from the source account
+        amount:
+          type: string
+          pattern: '^(0|[1-9][0-9]{0,15})(\.[0-9]{1,2})?$'
+          description: Positive decimal string with at most two decimal places
+        reference_id:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Globally unique transfer reference
+          example: rent-2026-10
+        description:
+          type: string
+          maxLength: 1000
+          default: ''
+
+    TransferResult:
+      type: object
+      additionalProperties: false
+      required:
+        - transfer_id
+        - source_transaction_id
+        - destination_transaction_id
+        - source_balance
+        - destination_balance
+        - amount
+        - reference_id
+        - description
+        - created_at
+      properties:
+        transfer_id:
+          type: string
+          format: uuid
+        source_transaction_id:
+          type: string
+          format: uuid
+        destination_transaction_id:
+          type: string
+          format: uuid
+        source_balance:
+          type: string
+          pattern: '^[0-9]{1,16}\.[0-9]{2}$'
+        destination_balance:
+          type: string
+          pattern: '^[0-9]{1,16}\.[0-9]{2}$'
+        amount:
+          type: string
+          pattern: '^[0-9]{1,16}\.[0-9]{2}$'
+        reference_id:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 1000
+        created_at:
+          type: string
+          format: date-time
+
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Stable machine-readable error code
+              example: INSUFFICIENT_FUNDS
+            message:
+              type: string
+              example: The account has insufficient funds for this debit
+            details:
+              description: Optional structured error details, such as validation issues or missing accounts
+
+  responses:
+    BadRequest:
+      description: Invalid input, malformed JSON, or a same-account transfer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            validation:
+              value:
+                error:
+                  code: VALIDATION_ERROR
+                  message: Request validation failed
+                  details:
+                    issues:
+                      - path: amount
+                        code: custom
+                        message: amount must be greater than zero
+            malformedJson:
+              value:
+                error:
+                  code: INVALID_JSON
+                  message: Request body contains malformed JSON
+            sameAccount:
+              value:
+                error:
+                  code: VALIDATION_ERROR
+                  message: Request validation failed
+                  details:
+                    issues:
+                      - path: destination_account_id
+                        code: custom
+                        message: source and destination accounts must be different
+
+    NotFound:
+      description: Account not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: ACCOUNT_NOT_FOUND
+              message: Account 11111111-1111-4111-8111-111111111111 was not found
+
+    Conflict:
+      description: Duplicate reference, insufficient funds, or balance limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            duplicateReference:
+              value:
+                error:
+                  code: DUPLICATE_REFERENCE
+                  message: A transaction with this reference_id already exists for this account
+            insufficientFunds:
+              value:
+                error:
+                  code: INSUFFICIENT_FUNDS
+                  message: The source account has insufficient funds for this transfer
+            balanceLimit:
+              value:
+                error:
+                  code: BALANCE_LIMIT_EXCEEDED
+                  message: The resulting destination balance exceeds the supported maximum
+
+    InternalServerError:
+      description: Unexpected failure
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              code: INTERNAL_ERROR
+              message: An unexpected error occurred
